@@ -1,0 +1,21 @@
+# Logs and outputs
+*.csv
+*.log
+*.failure-report.txt
+
+# ExifTool backups
+*_original
+
+# PowerShell old backups
+*_old.ps1
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
