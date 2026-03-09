@@ -30,6 +30,9 @@
 .PARAMETER WhatIf
   ドライランモード。ファイルを変更せず統計のみ出力。
 
+.PARAMETER Language
+    表示言語。`ja`（日本語）または `en`（英語）。
+
 .EXAMPLE
   .\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos"
 
@@ -38,6 +41,9 @@
 
 .EXAMPLE
   .\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos" -WhatIf
+
+.EXAMPLE
+    .\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos" -Language en
 #>
 [CmdletBinding()]
 param(
@@ -68,7 +74,10 @@ param(
     [int]$TimeToleranceSeconds = 86400,
 
     [ValidateRange(1, 32)]
-    [int]$Threads = 1
+    [int]$Threads = 1,
+
+    [ValidateSet('ja','en')]
+    [string]$Language = 'ja'
 )
 
 # ══════════════════════════════════════════════════════════
@@ -77,24 +86,34 @@ param(
 
 $script:UnixEpoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
 $startTime = Get-Date
+$script:IsEnglish = ($Language -eq 'en')
+
+function L {
+    param(
+        [Parameter(Mandatory=$true)][string]$Ja,
+        [Parameter(Mandatory=$true)][string]$En
+    )
+    if ($script:IsEnglish) { return $En }
+    return $Ja
+}
 
 $useOutputPath = $false
 if ($OutputPath -and $OutputPath.Trim().Length -gt 0) {
     $OutputPath = [System.IO.Path]::GetFullPath($OutputPath.Trim())
     $useOutputPath = $true
-    Write-Host "出力先フォルダ: $OutputPath (年/月階層で保存)"
+    Write-Host (L "出力先フォルダ: $OutputPath (年/月階層で保存)" "Output folder: $OutputPath (saved under year/month hierarchy)")
 }
 $script:UseOutputPath = $useOutputPath
 
 if ($Threads -gt 1) {
-    Write-Host "並列処理: $Threads スレッド"
+    Write-Host (L "並列処理: $Threads スレッド" "Parallel execution: $Threads threads")
 }
 
 # ══════════════════════════════════════════════════════════
 # ユーティリティ関数
 # ══════════════════════════════════════════════════════════
 
-function Detect-RealExtension {
+function Get-RealExtension {
     <# ファイルのマジックバイトを読み取り、実際のファイル形式に対応する拡張子を返す。
        判定できない場合は $null を返す。 #>
     param([string]$filePath)
@@ -145,20 +164,20 @@ function Detect-RealExtension {
     catch { return $null }
 }
 
-function Normalize-String {
+function ConvertTo-NormalizedString {
     param([string]$s)
     if ([string]::IsNullOrEmpty($s)) { return $s }
     try   { return $s.Normalize([System.Text.NormalizationForm]::FormC) }
     catch { return $s }
 }
 
-function Escape-CsvField {
+function ConvertTo-CsvEscapedField {
     param([string]$s)
     if ([string]::IsNullOrEmpty($s)) { return '""' }
     return '"' + $s.Replace('"', '""') + '"'
 }
 
-function Parse-JsonFile {
+function ConvertFrom-JsonFile {
     param([string]$jsonPath)
     try {
         $text = Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 -ErrorAction Stop
@@ -167,7 +186,7 @@ function Parse-JsonFile {
     catch { return $null }
 }
 
-function To-ExifDateTime {
+function ConvertTo-ExifDateTime {
     param([long]$unixTimestamp)
     if ($unixTimestamp -eq 0) { return $null }
     try {
@@ -282,9 +301,9 @@ function Find-MediaCandidate {
     )
 
     $title         = $titleFilename
-    $titleNorm     = (Normalize-String $title).ToLowerInvariant()
+    $titleNorm     = (ConvertTo-NormalizedString $title).ToLowerInvariant()
     $baseTitle     = [System.IO.Path]::GetFileNameWithoutExtension($title)
-    $baseTitleNorm = (Normalize-String $baseTitle).ToLowerInvariant()
+    $baseTitleNorm = (ConvertTo-NormalizedString $baseTitle).ToLowerInvariant()
     $jsonDir       = (Split-Path -Parent $jsonPath).ToLowerInvariant()
 
     # ── 同一ディレクトリ優先の選択ヘルパー ──
@@ -333,7 +352,7 @@ function Find-MediaCandidate {
         # 0d) 拡張子なし/切り詰め → プレフィックスマッチ
         $derivedExt = [System.IO.Path]::GetExtension($derivedName)
         if ([string]::IsNullOrEmpty($derivedExt) -or $derived.IsTruncated) {
-            $derivedNorm = (Normalize-String $derivedName).ToLowerInvariant()
+            $derivedNorm = (ConvertTo-NormalizedString $derivedName).ToLowerInvariant()
             $prefLen = $derivedNorm.Length
             if ($prefLen -ge 4) {
                 $pref = $derivedNorm.Substring(0, $prefLen)
@@ -367,7 +386,7 @@ function Find-MediaCandidate {
 
     # ── 2) Unicode 正規化で一致 ──
     foreach ($k in $filesByName.Keys) {
-        if ((Normalize-String $k) -eq $titleNorm) {
+        if ((ConvertTo-NormalizedString $k) -eq $titleNorm) {
             $matchMethod.Value = 'Title-Normalized'
             return (Select-PreferSameDir $filesByName[$k])
         }
@@ -393,7 +412,7 @@ function Find-MediaCandidate {
 
     # ── 4) ベース名完全一致 ──
     foreach ($kv in $filesByBase.GetEnumerator()) {
-        if ((Normalize-String $kv.Key) -eq $baseTitleNorm) {
+        if ((ConvertTo-NormalizedString $kv.Key) -eq $baseTitleNorm) {
             $matchMethod.Value = 'Base-Exact'
             return (Select-PreferSameDir $kv.Value)
         }
@@ -446,7 +465,7 @@ function Find-MediaCandidate {
     }
 
     # ── 7) タイムスタンプ近傍（同一ディレクトリ限定、最終手段） ──
-    $jsonObj = Parse-JsonFile -jsonPath $jsonPath
+    $jsonObj = ConvertFrom-JsonFile -jsonPath $jsonPath
     if ($null -ne $jsonObj -and $jsonObj.photoTakenTime -and $jsonObj.photoTakenTime.timestamp) {
         try {
             $targetTs = [double]$jsonObj.photoTakenTime.timestamp
@@ -550,7 +569,7 @@ function New-LogFields {
 
 function Write-LogLine {
     param([string[]]$Fields)
-    $line = ($Fields | ForEach-Object { Escape-CsvField $_ }) -join ','
+    $line = ($Fields | ForEach-Object { ConvertTo-CsvEscapedField $_ }) -join ','
     Add-Content -Path $LogFile -Value $line
 }
 
@@ -558,7 +577,7 @@ function Write-LogLine {
 # ExifTool 引数構築関数
 # ══════════════════════════════════════════════════════════
 
-function Build-ExifToolArgs {
+function Get-ExifToolArgs {
     <# JSON オブジェクトから ExifTool に渡すタグ引数リストを構築する。
        戻り値: @{ Args=[List[string]]; PhotoTime; CreateTime; HasGps; Description } #>
     param($json)
@@ -570,11 +589,11 @@ function Build-ExifToolArgs {
     # creationTime   → 更新日時 (ModifyDate, FileModifyDate)
     $dtPhoto = $null
     if ($json.photoTakenTime -and $json.photoTakenTime.timestamp) {
-        $dtPhoto = To-ExifDateTime -unixTimestamp ([long]$json.photoTakenTime.timestamp)
+        $dtPhoto = ConvertTo-ExifDateTime -unixTimestamp ([long]$json.photoTakenTime.timestamp)
     }
     $dtCreate = $null
     if ($json.creationTime -and $json.creationTime.timestamp) {
-        $dtCreate = To-ExifDateTime -unixTimestamp ([long]$json.creationTime.timestamp)
+        $dtCreate = ConvertTo-ExifDateTime -unixTimestamp ([long]$json.creationTime.timestamp)
     }
 
     if ($dtPhoto) {
@@ -653,7 +672,7 @@ function Build-ExifToolArgs {
 # ══════════════════════════════════════════════════════════
 
 if (-not (Test-Path -LiteralPath $PhotosPath)) {
-    throw "PhotosPath not found: $PhotosPath"
+    throw (L "PhotosPath が見つかりません: $PhotosPath" "PhotosPath not found: $PhotosPath")
 }
 
 # ── ログ初期化 ──
@@ -669,11 +688,11 @@ $csvHeader = if ($useOutputPath) {
 Set-Content -Path $LogFile -Value $csvHeader -Encoding UTF8
 
 # ── メディアファイルの収集 ──
-Write-Host "Phase 1: ファイルスキャン..."
-Write-Host "  Scanning media files under: $PhotosPath"
+Write-Host (L "Phase 1: ファイルスキャン..." "Phase 1: Scanning files...")
+Write-Host (L "  メディアファイルをスキャン中: $PhotosPath" "  Scanning media files under: $PhotosPath")
 $allFiles = @(Get-ChildItem -LiteralPath $PhotosPath -File -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $Extensions -contains $_.Extension.ToLowerInvariant() })
-Write-Host "  Found $($allFiles.Count) media files."
+Write-Host (L "  メディアファイル $($allFiles.Count) 件を検出しました。" "  Found $($allFiles.Count) media files.")
 
 # ── ヘルパーマップの構築 ──
 $filesByName = @{}   # filename.ext (lower) → @(FullPath, ...)
@@ -695,17 +714,17 @@ foreach ($f in $allFiles) {
 }
 
 # ── JSON ファイルの検索・検証 ──
-Write-Host "  Finding metadata JSON files..."
+Write-Host (L "  メタデータ JSON ファイルを検索中..." "  Finding metadata JSON files...")
 $allJsonCandidates = @(Get-ChildItem -LiteralPath $PhotosPath -File -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -eq '.json' })
-Write-Host "  Found $($allJsonCandidates.Count) JSON files total. Validating content..."
+Write-Host (L "  JSON ファイルを合計 $($allJsonCandidates.Count) 件検出。内容を検証します..." "  Found $($allJsonCandidates.Count) JSON files total. Validating content...")
 
 $jsonFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 $validatedCount = 0
 foreach ($jc in $allJsonCandidates) {
     $validatedCount++
     if ($validatedCount % 200 -eq 0) {
-        Write-Host "  Validating... $validatedCount / $($allJsonCandidates.Count)"
+        Write-Host (L "  検証中... $validatedCount / $($allJsonCandidates.Count)" "  Validating... $validatedCount / $($allJsonCandidates.Count)")
     }
     if (Test-GooglePhotosJson -path $jc.FullName) {
         $jsonFiles.Add($jc)
@@ -713,10 +732,10 @@ foreach ($jc in $allJsonCandidates) {
 }
 
 if ($jsonFiles.Count -eq 0) {
-    Write-Host "No Google Photos metadata JSON files found."
+    Write-Host (L "Google Photos メタデータ JSON が見つかりませんでした。" "No Google Photos metadata JSON files found.")
     exit
 }
-Write-Host "  Validated: $($jsonFiles.Count) Google Photos metadata JSON files."
+Write-Host (L "  検証済み: Google Photos メタデータ JSON $($jsonFiles.Count) 件。" "  Validated: $($jsonFiles.Count) Google Photos metadata JSON files.")
 
 # ══════════════════════════════════════════════════════════
 # Phase 2: マッチング＆作業アイテム構築
@@ -726,7 +745,7 @@ Write-Host "  Validated: $($jsonFiles.Count) Google Photos metadata JSON files."
 $script:assignedPaths = @{}
 
 Write-Host ""
-Write-Host "Phase 2: JSON とメディアファイルのマッチング..."
+Write-Host (L "Phase 2: JSON とメディアファイルのマッチング..." "Phase 2: Matching JSON and media files...")
 
 $workItems     = [System.Collections.Generic.List[hashtable]]::new()
 $failJsonParse = [System.Collections.Generic.List[string]]::new()
@@ -738,13 +757,13 @@ for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
 
     # ── プログレス ──
     if (($i + 1) % 100 -eq 0 -or $i -eq 0 -or $i -eq $jsonFiles.Count - 1) {
-        Write-Progress -Activity "マッチング" `
+        Write-Progress -Activity (L "マッチング" "Matching") `
             -Status "$($i + 1) / $($jsonFiles.Count): $($jf.Name)" `
             -PercentComplete ([int](100 * ($i + 1) / $jsonFiles.Count))
     }
 
     # ── JSON 解析 ──
-    $json = Parse-JsonFile -jsonPath $jf.FullName
+    $json = ConvertFrom-JsonFile -jsonPath $jf.FullName
     if ($null -eq $json) {
         Write-LogLine (New-LogFields -JsonPath $jf.FullName -Result 'JSONParseError' -Notes 'JSON parse failed')
         $failJsonParse.Add($jf.FullName)
@@ -788,7 +807,7 @@ for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
     }
 
     # ── ExifTool 引数の構築 ──
-    $meta = Build-ExifToolArgs -json $json
+    $meta = Get-ExifToolArgs -json $json
 
     if ($meta.Args.Count -eq 0) {
         $failNoMeta.Add($jf.FullName)
@@ -807,7 +826,7 @@ for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
     if ($useOutputPath) {
         # マジックバイトで実際のファイル形式を検出し、拡張子不一致なら修正
         $mediaLeaf = Split-Path -Leaf $candidate
-        $realExt = Detect-RealExtension -filePath $candidate
+        $realExt = Get-RealExtension -filePath $candidate
         if ($realExt) {
             $currentExt = [System.IO.Path]::GetExtension($mediaLeaf).ToLowerInvariant()
             $normalizeMap = @{ '.jpeg'='.jpg'; '.tiff'='.tif' }
@@ -852,8 +871,8 @@ for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
     })
 }
 
-Write-Progress -Activity "マッチング" -Status "完了" -PercentComplete 100 -Completed
-Write-Host ("  マッチ完了: {0} 件の処理対象, {1} JSON解析エラー, {2} メディア不一致, {3} メタデータなし" `
+Write-Progress -Activity (L "マッチング" "Matching") -Status (L "完了" "Completed") -PercentComplete 100 -Completed
+Write-Host ((L "  マッチ完了: {0} 件の処理対象, {1} JSON解析エラー, {2} メディア不一致, {3} メタデータなし" "  Matching complete: {0} work items, {1} JSON parse errors, {2} media mismatches, {3} no metadata") `
     -f $workItems.Count, $failJsonParse.Count, $failNoMedia.Count, $failNoMeta.Count)
 
 # ══════════════════════════════════════════════════════════
@@ -865,11 +884,11 @@ $successList  = [System.Collections.Generic.List[psobject]]::new()
 $totalWork    = $workItems.Count
 
 if ($totalWork -eq 0) {
-    Write-Host "`n処理対象のファイルがありません。"
+    Write-Host (L "`n処理対象のファイルがありません。" "`nNo files to process.")
 }
 elseif ($WhatIf) {
     # ═══════ WhatIf モード ═══════
-    Write-Host "`nPhase 3: WhatIf モード（$totalWork 件）..."
+    Write-Host (L "`nPhase 3: WhatIf モード（$totalWork 件）..." "`nPhase 3: WhatIf mode ($totalWork items)...")
     foreach ($item in $workItems) {
         $successList.Add([pscustomobject]@{
             JsonPath    = $item.JsonPath
@@ -890,12 +909,12 @@ elseif ($WhatIf) {
 }
 elseif ($Threads -le 1) {
     # ═══════ シーケンシャル実行 ═══════
-    Write-Host "`nPhase 3: シーケンシャル実行（$totalWork 件）..."
+    Write-Host (L "`nPhase 3: シーケンシャル実行（$totalWork 件）..." "`nPhase 3: Sequential execution ($totalWork items)...")
     $completedCount = 0
 
     foreach ($item in $workItems) {
         $completedCount++
-        Write-Progress -Activity "ExifTool 実行中" `
+        Write-Progress -Activity (L "ExifTool 実行中" "Running ExifTool") `
             -Status "$completedCount / $totalWork" `
             -PercentComplete ([int](100 * $completedCount / $totalWork))
 
@@ -1013,7 +1032,7 @@ elseif ($Threads -le 1) {
 
                 # ExifTool 失敗時もコピー先ファイルは保持
                 if ($useOutputPath -and (Test-Path -LiteralPath $item.DestPath)) {
-                    Write-Host "    ExifTool失敗: メタデータなしで保持 $($item.DestPath)" -ForegroundColor Yellow
+                    Write-Host (L "    ExifTool失敗: メタデータなしで保持 $($item.DestPath)" "    ExifTool failed: keeping file without metadata $($item.DestPath)") -ForegroundColor Yellow
                 }
             }
         }
@@ -1029,7 +1048,7 @@ elseif ($Threads -le 1) {
                 -DestPath $item.DestPath -Notes "Exception: $($_.Exception.Message)")
 
             if ($useOutputPath -and $item.DestPath -and (Test-Path -LiteralPath $item.DestPath)) {
-                Write-Host "    例外発生: メタデータなしで保持 $($item.DestPath)" -ForegroundColor Yellow
+                Write-Host (L "    例外発生: メタデータなしで保持 $($item.DestPath)" "    Exception occurred: keeping file without metadata $($item.DestPath)") -ForegroundColor Yellow
             }
         }
         finally {
@@ -1039,11 +1058,11 @@ elseif ($Threads -le 1) {
         }
     }
 
-    Write-Progress -Activity "ExifTool 実行中" -Status "完了" -PercentComplete 100 -Completed
+    Write-Progress -Activity (L "ExifTool 実行中" "Running ExifTool") -Status (L "完了" "Completed") -PercentComplete 100 -Completed
 }
 else {
     # ═══════ 並列実行（RunspacePool） ═══════
-    Write-Host "`nPhase 3: 並列実行（$totalWork 件, $Threads スレッド）..."
+    Write-Host (L "`nPhase 3: 並列実行（$totalWork 件, $Threads スレッド）..." "`nPhase 3: Parallel execution ($totalWork items, $Threads threads)...")
 
     # ── 実行スクリプトブロック（各 Runspace で独立実行） ──
     $executeBlock = {
@@ -1200,7 +1219,7 @@ else {
             $remaining.RemoveAt($ri)
             $completedCount++
 
-            Write-Progress -Activity "ExifTool 並列実行中" `
+            Write-Progress -Activity (L "ExifTool 並列実行中" "Running ExifTool in parallel") `
                 -Status "$completedCount / $totalWork" `
                 -PercentComplete ([int](100 * $completedCount / $totalWork))
 
@@ -1243,7 +1262,7 @@ else {
                     -DestPath $item.DestPath -Notes $errDetail)
 
                 if ($useOutputPath -and $item.DestPath -and (Test-Path -LiteralPath $item.DestPath)) {
-                    Write-Host "    ExifTool失敗: メタデータなしで保持 $($item.DestPath)" -ForegroundColor Yellow
+                    Write-Host (L "    ExifTool失敗: メタデータなしで保持 $($item.DestPath)" "    ExifTool failed: keeping file without metadata $($item.DestPath)") -ForegroundColor Yellow
                 }
             }
         }
@@ -1255,7 +1274,7 @@ else {
 
     $pool.Close()
     $pool.Dispose()
-    Write-Progress -Activity "ExifTool 並列実行中" -Status "完了" -PercentComplete 100 -Completed
+    Write-Progress -Activity (L "ExifTool 並列実行中" "Running ExifTool in parallel") -Status (L "完了" "Completed") -PercentComplete 100 -Completed
 }
 
 # ══════════════════════════════════════════════════════════
@@ -1271,50 +1290,50 @@ $totalNoMeta    = $failNoMeta.Count
 
 Write-Host ""
 Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host " 処理結果サマリー" -ForegroundColor Cyan
+Write-Host (L " 処理結果サマリー" " Processing Summary") -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "処理対象 JSON 数:  $totalProcessed"
-Write-Host "更新成功/予定:     $totalUpdated" -ForegroundColor Green
+Write-Host (L "処理対象 JSON 数:  $totalProcessed" "Processed JSON files: $totalProcessed")
+Write-Host (L "更新成功/予定:     $totalUpdated" "Updated/Planned:      $totalUpdated") -ForegroundColor Green
 $extFixedCount = @($successList | Where-Object { $_.ExtFixed }).Count
 if ($extFixedCount -gt 0) {
-    Write-Host "  拡張子修正:      $extFixedCount 件" -ForegroundColor Cyan
+    Write-Host (L "  拡張子修正:      $extFixedCount 件" "  Extension fixes:    $extFixedCount") -ForegroundColor Cyan
 }
-Write-Host "メディア不一致:    $totalNoMedia" -ForegroundColor Yellow
-Write-Host "メタデータなし:    $totalNoMeta" -ForegroundColor Yellow
-Write-Host "JSON解析エラー:    $($failJsonParse.Count)" -ForegroundColor Red
-Write-Host "ExifToolエラー:    $totalErrors" -ForegroundColor Red
+Write-Host (L "メディア不一致:    $totalNoMedia" "Media mismatches:     $totalNoMedia") -ForegroundColor Yellow
+Write-Host (L "メタデータなし:    $totalNoMeta" "No metadata to write: $totalNoMeta") -ForegroundColor Yellow
+Write-Host (L "JSON解析エラー:    $($failJsonParse.Count)" "JSON parse errors:    $($failJsonParse.Count)") -ForegroundColor Red
+Write-Host (L "ExifToolエラー:    $totalErrors" "ExifTool errors:      $totalErrors") -ForegroundColor Red
 if ($Threads -gt 1) {
-    Write-Host "実行スレッド数:    $Threads" -ForegroundColor Cyan
+    Write-Host (L "実行スレッド数:    $Threads" "Thread count:         $Threads") -ForegroundColor Cyan
 }
 if ($useOutputPath) {
-    Write-Host "出力先フォルダ:    $OutputPath" -ForegroundColor Cyan
+    Write-Host (L "出力先フォルダ:    $OutputPath" "Output folder:        $OutputPath") -ForegroundColor Cyan
 }
-Write-Host "処理時間:          $($elapsed.ToString('hh\:mm\:ss\.ff'))" -ForegroundColor Cyan
-Write-Host "ログファイル:      $LogFile"
+Write-Host (L "処理時間:          $($elapsed.ToString('hh\:mm\:ss\.ff'))" "Elapsed time:         $($elapsed.ToString('hh\:mm\:ss\.ff'))") -ForegroundColor Cyan
+Write-Host (L "ログファイル:      $LogFile" "Log file:             $LogFile")
 Write-Host ""
 
 # ── 失敗詳細レポート ──
 $reportPath  = [System.IO.Path]::ChangeExtension($LogFile, '.failure-report.txt')
 $reportLines = [System.Collections.Generic.List[string]]::new()
 
-$reportLines.Add("=== 失敗・結果レポート ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===")
-$reportLines.Add("対象パス: $PhotosPath")
-if ($useOutputPath) { $reportLines.Add("出力先:   $OutputPath (年/月階層)") }
-if ($Threads -gt 1) { $reportLines.Add("スレッド: $Threads") }
-$reportLines.Add("モード:   $(if($WhatIf){'WhatIf (ドライラン)'}else{'実行'})")
-$reportLines.Add("処理時間: $($elapsed.ToString('hh\:mm\:ss\.ff'))")
+$reportLines.Add((L "=== 失敗・結果レポート ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" "=== Failure and Result Report ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ==="))
+$reportLines.Add((L "対象パス: $PhotosPath" "Target path: $PhotosPath"))
+if ($useOutputPath) { $reportLines.Add((L "出力先:   $OutputPath (年/月階層)" "Output:    $OutputPath (year/month hierarchy)")) }
+if ($Threads -gt 1) { $reportLines.Add((L "スレッド: $Threads" "Threads:   $Threads")) }
+$reportLines.Add((L "モード:   $(if($WhatIf){'WhatIf (ドライラン)'}else{'実行'})" "Mode:      $(if($WhatIf){'WhatIf (dry-run)'}else{'Execute'})"))
+$reportLines.Add((L "処理時間: $($elapsed.ToString('hh\:mm\:ss\.ff'))" "Elapsed:   $($elapsed.ToString('hh\:mm\:ss\.ff'))"))
 $reportLines.Add("")
 
 # [1] JSON 解析エラー
-$reportLines.Add("─── [1] JSON 解析エラー ($($failJsonParse.Count) 件) ───")
+$reportLines.Add((L "─── [1] JSON 解析エラー ($($failJsonParse.Count) 件) ───" "--- [1] JSON parse errors ($($failJsonParse.Count)) ---"))
 if ($failJsonParse.Count -gt 0) {
     foreach ($fp in $failJsonParse) { $reportLines.Add("  $fp") }
 }
-else { $reportLines.Add("  (なし)") }
+else { $reportLines.Add((L "  (なし)" "  (none)")) }
 $reportLines.Add("")
 
 # [2] メディアファイル不一致
-$reportLines.Add("─── [2] メディアファイル不一致 ($($failNoMedia.Count) 件) ───")
+$reportLines.Add((L "─── [2] メディアファイル不一致 ($($failNoMedia.Count) 件) ───" "--- [2] Media mismatches ($($failNoMedia.Count)) ---"))
 if ($failNoMedia.Count -gt 0) {
     foreach ($item in $failNoMedia) {
         $reportLines.Add("  JSON:   $($item.JsonPath)")
@@ -1323,19 +1342,19 @@ if ($failNoMedia.Count -gt 0) {
         $reportLines.Add("")
     }
 }
-else { $reportLines.Add("  (なし)") }
+else { $reportLines.Add((L "  (なし)" "  (none)")) }
 $reportLines.Add("")
 
 # [3] メタデータなし
-$reportLines.Add("─── [3] 書き込むメタデータなし ($($failNoMeta.Count) 件) ───")
+$reportLines.Add((L "─── [3] 書き込むメタデータなし ($($failNoMeta.Count) 件) ───" "--- [3] No metadata to write ($($failNoMeta.Count)) ---"))
 if ($failNoMeta.Count -gt 0) {
     foreach ($fp in $failNoMeta) { $reportLines.Add("  $fp") }
 }
-else { $reportLines.Add("  (なし)") }
+else { $reportLines.Add((L "  (なし)" "  (none)")) }
 $reportLines.Add("")
 
 # [4] ExifTool エラー
-$reportLines.Add("─── [4] ExifTool エラー ($($failExifTool.Count) 件) ───")
+$reportLines.Add((L "─── [4] ExifTool エラー ($($failExifTool.Count) 件) ───" "--- [4] ExifTool errors ($($failExifTool.Count)) ---"))
 if ($failExifTool.Count -gt 0) {
     foreach ($item in $failExifTool) {
         $reportLines.Add("  JSON:   $($item.JsonPath)")
@@ -1345,19 +1364,19 @@ if ($failExifTool.Count -gt 0) {
         $reportLines.Add("")
     }
 }
-else { $reportLines.Add("  (なし)") }
+else { $reportLines.Add((L "  (なし)" "  (none)")) }
 $reportLines.Add("")
 
 # [5] 成功 / WhatIf
 if ($WhatIf) {
-    $reportLines.Add("─── [5] WhatIf: 変換予定 ($($successList.Count) 件) ───")
+    $reportLines.Add((L "─── [5] WhatIf: 変換予定 ($($successList.Count) 件) ───" "--- [5] WhatIf: planned conversions ($($successList.Count)) ---"))
     $methodStats = $successList | Group-Object -Property MatchMethod | Sort-Object Count -Descending
-    $reportLines.Add("  マッチ方法別統計:")
+    $reportLines.Add((L "  マッチ方法別統計:" "  Match method statistics:"))
     foreach ($g in $methodStats) {
-        $reportLines.Add("    $($g.Name): $($g.Count) 件")
+        $reportLines.Add((L "    $($g.Name): $($g.Count) 件" "    $($g.Name): $($g.Count)"))
     }
     $reportLines.Add("")
-    $reportLines.Add("  ファイルリスト:")
+    $reportLines.Add((L "  ファイルリスト:" "  File list:"))
     foreach ($s in $successList) {
         if ($useOutputPath -and $s.DestPath) {
             $reportLines.Add("    [$($s.MatchMethod)] $($s.MediaPath) → $($s.DestPath)")
@@ -1368,7 +1387,7 @@ if ($WhatIf) {
     }
 }
 else {
-    $reportLines.Add("─── [5] 更新成功 ($($successList.Count) 件) ───")
+    $reportLines.Add((L "─── [5] 更新成功 ($($successList.Count) 件) ───" "--- [5] Updated successfully ($($successList.Count)) ---"))
     foreach ($s in $successList) {
         if ($useOutputPath -and $s.DestPath) {
             $reportLines.Add("    [$($s.MatchMethod)] $($s.MediaPath) → $($s.DestPath)")
@@ -1382,51 +1401,61 @@ else {
 $reportContent = $reportLines -join "`r`n"
 Set-Content -Path $reportPath -Value $reportContent -Encoding UTF8
 
-Write-Host "失敗レポート: $reportPath"
+Write-Host (L "失敗レポート: $reportPath" "Failure report: $reportPath")
 
 # ── WhatIf 時の追加コンソール出力 ──
 if ($WhatIf) {
     Write-Host ""
-    Write-Host "=== WhatIf マッチ方法統計 ===" -ForegroundColor Magenta
+    Write-Host (L "=== WhatIf マッチ方法統計 ===" "=== WhatIf Match Method Statistics ===") -ForegroundColor Magenta
     $successList | Group-Object -Property MatchMethod | Sort-Object Count -Descending | ForEach-Object {
-        Write-Host ("  {0,-30} {1,6} 件" -f $_.Name, $_.Count)
+        if ($script:IsEnglish) {
+            Write-Host ("  {0,-30} {1,6}" -f $_.Name, $_.Count)
+        }
+        else {
+            Write-Host ("  {0,-30} {1,6} 件" -f $_.Name, $_.Count)
+        }
     }
     Write-Host ""
 
     # 出力先フォルダ使用時: 年/月 分布統計
     if ($useOutputPath -and $successList.Count -gt 0) {
-        Write-Host "=== WhatIf 出力先フォルダ分布 ===" -ForegroundColor Cyan
+        Write-Host (L "=== WhatIf 出力先フォルダ分布 ===" "=== WhatIf Output Folder Distribution ===") -ForegroundColor Cyan
         $destStats = $successList | Where-Object { $_.DestPath } | ForEach-Object {
             $rel = $_.DestPath.Substring($OutputPath.Length).TrimStart('\', '/')
             $parts = $rel -split '[/\\]'
             if ($parts.Count -ge 2) { "$($parts[0])/$($parts[1])" } else { $parts[0] }
         } | Group-Object | Sort-Object Name
         foreach ($g in $destStats) {
-            Write-Host ("  {0,-15} {1,6} 件" -f $g.Name, $g.Count)
+            if ($script:IsEnglish) {
+                Write-Host ("  {0,-15} {1,6}" -f $g.Name, $g.Count)
+            }
+            else {
+                Write-Host ("  {0,-15} {1,6} 件" -f $g.Name, $g.Count)
+            }
         }
         Write-Host ""
     }
 
     $totalFailures = $failJsonParse.Count + $failNoMedia.Count + $failNoMeta.Count
     if ($totalFailures -gt 0) {
-        Write-Host "=== WhatIf 失敗サマリー ($totalFailures 件) ===" -ForegroundColor Red
+        Write-Host (L "=== WhatIf 失敗サマリー ($totalFailures 件) ===" "=== WhatIf Failure Summary ($totalFailures) ===") -ForegroundColor Red
         if ($failJsonParse.Count -gt 0) {
-            Write-Host "  JSON解析エラー: $($failJsonParse.Count) 件" -ForegroundColor Red
+            Write-Host (L "  JSON解析エラー: $($failJsonParse.Count) 件" "  JSON parse errors: $($failJsonParse.Count)") -ForegroundColor Red
         }
         if ($failNoMedia.Count -gt 0) {
-            Write-Host "  メディア不一致: $($failNoMedia.Count) 件" -ForegroundColor Yellow
-            Write-Host "    (上位5件):" -ForegroundColor Yellow
+            Write-Host (L "  メディア不一致: $($failNoMedia.Count) 件" "  Media mismatches: $($failNoMedia.Count)") -ForegroundColor Yellow
+            Write-Host (L "    (上位5件):" "    (top 5):") -ForegroundColor Yellow
             $failNoMedia | Select-Object -First 5 | ForEach-Object {
-                Write-Host "      Title=$($_.Title)  JSON=$($_.JsonPath)" -ForegroundColor Yellow
+                Write-Host (L "      タイトル=$($_.Title)  JSON=$($_.JsonPath)" "      Title=$($_.Title)  JSON=$($_.JsonPath)") -ForegroundColor Yellow
             }
         }
         if ($failNoMeta.Count -gt 0) {
-            Write-Host "  メタデータなし: $($failNoMeta.Count) 件" -ForegroundColor Yellow
+            Write-Host (L "  メタデータなし: $($failNoMeta.Count) 件" "  No metadata to write: $($failNoMeta.Count)") -ForegroundColor Yellow
         }
         Write-Host ""
-        Write-Host "詳細は失敗レポートを参照: $reportPath" -ForegroundColor Yellow
+        Write-Host (L "詳細は失敗レポートを参照: $reportPath" "See failure report for details: $reportPath") -ForegroundColor Yellow
     }
     else {
-        Write-Host "すべてのデータが正常に変換される見込みです。" -ForegroundColor Green
+        Write-Host (L "すべてのデータが正常に変換される見込みです。" "All data is expected to be converted successfully.") -ForegroundColor Green
     }
 }

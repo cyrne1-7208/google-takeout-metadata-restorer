@@ -2,28 +2,45 @@
 
 **[English README](README.md)**
 
-Google Takeout でエクスポートした写真・動画の EXIF メタデータ（撮影日時、GPS、説明文）を、付属の JSON ファイルから復元するスクリプトです。
+Google Takeout の `.supplemental-metadata.json` から、写真・動画ファイルに EXIF メタデータ（撮影日時、GPS、説明、タイトル）を書き戻す PowerShell スクリプトです。
+他の写真管理アプリへ移行するときに、日時順や位置情報を維持しやすくします。
 
-Google Takeout で写真をエクスポートすると、メタデータが `.supplemental-metadata.json` という別ファイルに分離されます。そのまま他のアプリにインポートすると日付がバラバラになり、位置情報も消えます。このツールは [ExifTool](https://exiftool.org/) を使ってメタデータを書き戻します。
+## 概要
+Google Takeout では、メディア本体とメタデータが別ファイルとして出力されます。移行先によっては JSON のメタデータが無視され、撮影日や位置情報が失われます。
+このツールは [ExifTool](https://exiftool.org/) を使って、JSON 側の情報をメディアファイルの EXIF タグへ再適用します。
+
+### 対象ユーザー
+- Google Takeout から写真・動画を移行するユーザー
+- 撮影日時や位置情報を保持したいユーザー
 
 ## 特徴
+- Google Takeout の切り詰めファイル名に対応した段階的マッチング
+- `-Threads`（`1` から `32`）による並列 ExifTool 実行
+- `-OutputPath` 指定時の `YYYY/MM/` 階層出力
+- マジックバイト判定による拡張子の自動補正
+- 日本語/CJK を含む Unicode ファイル名に対応
+- `-WhatIf` によるドライラン
+- CSV ログと失敗レポートの出力
+- `-Language` による表示言語切替（日本語/英語）
 
-- **スマートマッチング** — Google Takeout の切り詰めファイル名にも対応する8段階マッチング
-- **マルチスレッド** — `-Threads` で並列 ExifTool 実行
-- **年月フォルダ出力** — `-OutputPath` で `YYYY/MM/` 階層に整理（元ファイルは変更なし）
-- **拡張子自動修正** — マジックバイトで実際のファイル形式を検出
-- **Unicode 対応** — 日本語ファイル名を安全に処理
-- **WhatIf モード** — 変更なしのシミュレーション実行
-- **CSV ログ** — ファイルごとの処理結果・マッチ方法・エラー詳細を記録
-
-## 必要なもの
-
+## 必要環境
+- PowerShell 5.1 以上（Windows）または PowerShell 7+
 - [ExifTool](https://exiftool.org/)
-- PowerShell 5.1 以上（Windows 標準搭載）または PowerShell 7+
+
+## ステータス
+- README 最終更新日: 2026-03-09
+- 対応環境: PowerShell 5.1 以上 / ExifTool 安定版
 
 ## インストール
+1. リポジトリを取得します。
+2. ExifTool をインストールします。
 
-### ExifTool
+```powershell
+git clone https://github.com/cyrne1-7208/google-takeout-metadata-restorer.git
+cd google-takeout-metadata-restorer
+```
+
+ExifTool インストール例:
 
 ```powershell
 # Windows
@@ -32,74 +49,110 @@ winget install exiftool
 # macOS
 brew install exiftool
 
-# Linux
+# Ubuntu/Debian
 sudo apt install libimage-exiftool-perl
 ```
 
-<details>
-<summary>Windows 手動インストール</summary>
-
-1. [exiftool.org](https://exiftool.org/) からダウンロード
-2. `exiftool(-k).exe` を `exiftool.exe` にリネーム
-3. `PATH` の通ったディレクトリに配置
-
-</details>
-
-### 本スクリプト
+## クイックスタート
+まずはファイルを変更しない `-WhatIf` で確認します。
 
 ```powershell
-git clone https://github.com/cyrne1-7208/google-takeout-metadata-restorer.git
-cd google-takeout-metadata-restorer
+.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos" -WhatIf -Language en
+```
+
+期待結果:
+
+```text
+マッチング統計、更新予定件数、失敗サマリーが表示されます。
+WhatIf では実ファイルは変更されません。
 ```
 
 ## 使い方
+通常実行（インプレース更新）:
 
 ```powershell
-# 基本（ファイルを直接変更）
-.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google フォト"
-
-# 年月フォルダに出力（元ファイルはそのまま）
-.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google フォト" -OutputPath "D:\Photos"
-
-# プレビュー（変更なし）
-.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google フォト" -WhatIf
-
-# マルチスレッド
-.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google フォト" -OutputPath "D:\Photos" -Threads 8
+.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos"
 ```
 
-> 実行ポリシーエラーが出た場合: `Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process`
+年月フォルダへ出力（元ファイル保持）:
 
-## パラメータ
+```powershell
+.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos" -OutputPath "D:\Photos"
+```
 
-| パラメータ | デフォルト | 説明 |
-|-----------|-----------|------|
-| `-PhotosPath` | *(必須)* | Google Takeout の写真フォルダ |
-| `-OutputPath` | | `YYYY/MM/` 出力先フォルダ |
-| `-Threads` | `1` | 並列スレッド数（1〜32） |
-| `-WhatIf` | | ドライランモード |
-| `-ExifToolPath` | `exiftool` | ExifTool のパス |
-| `-NoBackup` | | `_original` バックアップを作成しない |
-| `-OriginalFileAction` | `Keep` | バックアップ処理: `Keep` / `Rename` / `Delete` |
-| `-LogFile` | `restore-metadata-log.csv` | CSV ログ出力先 |
-| `-Extensions` | 14種類 | 処理対象の拡張子 |
+並列実行:
+
+```powershell
+.\restore_metadata.ps1 -PhotosPath "C:\Takeout\Google Photos" -OutputPath "D:\Photos" -Threads 8
+```
+
+実行ポリシーによりブロックされる場合:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+```
+
+## 設定
+| パラメータ | 必須 | 既定値 | 説明 |
+|---|---|---|---|
+| `-PhotosPath` | 必須 | なし | Google Takeout のメディアルートフォルダ |
+| `-Extensions` | 任意 | 15 種類 | 処理対象の拡張子 |
+| `-ExifToolPath` | 任意 | `exiftool` | ExifTool 実行ファイルのパス |
+| `-WhatIf` | 任意 | `false` | ドライラン（ファイル変更なし） |
+| `-NoBackup` | 任意 | `false` | `_original` バックアップを作成しない |
+| `-OriginalFileAction` | 任意 | `Keep` | `_original` の扱い（`Keep` / `Rename` / `Delete`） |
+| `-OutputPath` | 任意 | 空 | `YYYY/MM/` 階層での出力先ルート |
+| `-LogFile` | 任意 | `restore-metadata-log.csv` | CSV ログ出力先 |
+| `-PrefixMatchChars` | 任意 | `20` | プレフィックス一致に使う文字数 |
+| `-TimeToleranceSeconds` | 任意 | `86400` | タイムスタンプ近傍判定の許容秒数 |
+| `-Threads` | 任意 | `1` | 並列ワーカー数（`1` から `32`） |
+| `-Language` | 任意 | `ja` | 表示言語（`ja` / `en`） |
 
 ## 復元されるメタデータ
-
-| メタデータ | EXIF タグ |
-|-----------|-----------|
+| 項目 | EXIF タグ |
+|---|---|
 | 撮影日時 | `DateTimeOriginal`, `CreateDate` |
 | 更新日時 | `ModifyDate`, `FileModifyDate` |
-| GPS | `GPSLatitude/Longitude/Altitude` + Ref |
-| 説明文 | `ImageDescription`, `XPComment` |
+| GPS | `GPSLatitude`, `GPSLongitude`, `GPSAltitude`（＋Ref） |
+| 説明 | `ImageDescription`, `XPComment` |
 | タイトル | `Title`, `XPTitle` |
 
+## プロジェクト構成
+| パス | 役割 |
+|---|---|
+| `restore_metadata.ps1` | メタデータ復元の本体スクリプト |
+| `README.md` | 英語ドキュメント |
+| `README_ja.md` | 日本語ドキュメント |
+| `LICENSE` | MIT ライセンス本文 |
+
+## テスト
+このリポジトリには自動テストスイートはありません。
+小さな Takeout サンプルで `-WhatIf` を先に実行し、結果を確認してから本実行してください。
+
+## トラブルシューティング
+- `Execution policy` エラー: `Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process` を実行します。
+- `exiftool` が見つからない: `-ExifToolPath` で `exiftool.exe` のフルパスを指定します。
+- 影響範囲が不安: `-WhatIf` で事前確認し、CSV と failure report を確認します。
+- 英語表示にしたい: `-Language en` を指定します。
+
 ## 謝辞
+- ベース実装: [pfilbin90/google-takeout-metadata-restorer](https://github.com/pfilbin90/google-takeout-metadata-restorer)
+- メタデータ処理ツール: [ExifTool](https://exiftool.org/)
 
-本プロジェクトは [pfilbin90/google-takeout-metadata-restorer](https://github.com/pfilbin90/google-takeout-metadata-restorer) をベースにしています。MIT ライセンスに基づき独自にフォークしたものであり、原作者からの明示的な許可は得ていません。
+## 生成支援ツール利用
+- 使用 AI: GPT-5.3-Codex（README/スクリプト更新）、Claude Opus 4.6（過去の開発支援）
+- 利用範囲: ドキュメント構成整理、文言調整、言語オプション実装
+- 人手レビュー: `restore_metadata.ps1` と照合して、パラメータ名・コマンド例・説明を確認
 
-AI である [Claude Opus 4.6](https://claude.ai/)（Anthropic）の支援を受けて開発されました。
+## コントリビュート
+Issue / Pull Request を歓迎します。
+PR には以下を含めてください。
+- 変更目的
+- 実装内容の要約
+- 再現手順または確認手順
 
 ## ライセンス
+MIT ライセンスです。詳細は `LICENSE` を参照してください。
 
-MIT — [LICENSE](LICENSE) を参照。
+## サポート
+不具合報告や質問は、このリポジトリの Issue へ投稿してください。
